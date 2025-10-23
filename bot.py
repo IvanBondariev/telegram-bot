@@ -34,6 +34,8 @@ if not BOT_TOKEN:
 
 # Состояния диалога /profit
 ASK_AMOUNT = 1
+# Состояния диалога предложений
+SUGGEST_WAIT_TEXT = 2
 
 
 def fmt_uah(value: float) -> str:
@@ -80,6 +82,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [
                 [KeyboardButton("Добавить профит"), KeyboardButton("Моя статистика")],
                 [KeyboardButton("Статистика"), KeyboardButton("Помощь")],
+                [KeyboardButton("Предложения по улучшению")],
             ],
             resize_keyboard=True,
         )
@@ -91,6 +94,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Отправить профит", callback_data="start_profit")],
         [InlineKeyboardButton("Моя статистика", callback_data="start:my")],
         [InlineKeyboardButton("Статистика", callback_data="start:stats"), InlineKeyboardButton("Помощь", callback_data="start:help")],
+        [InlineKeyboardButton("Предложения по улучшению", callback_data="start:suggest")],
     ])
     await update.message.reply_text(text, reply_markup=keyboard)
 
@@ -506,6 +510,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "start:my":
         await my_command(update, context)
         return
+    # Удалено: if data == "start:suggest": await suggest_start_conv(update, context); return
 
     # Статистика: периоды
     if data.startswith("stats:"):
@@ -723,6 +728,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /profit — отправить заявку на профит",
             "• /cancel — отменить текущую заявку",
             "• /my — личная статистика",
+            "• /suggest — отправить предложение по улучшению",
         ]
         if is_admin:
             lines += [
@@ -749,10 +755,81 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(chat_id=query.message.chat.id, text=text)
         except Exception:
+                try:
+                    await query.edit_message_text(text=text)
+                except Exception:
+                    pass
+
+
+async def suggest_start_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user_seen(user.id, user.username, user.first_name)
+    prompt = "Опишите ваше предложение по улучшению одним сообщением. Для отмены — /cancel."
+    if update.message:
+        await update.message.reply_text(prompt)
+    else:
+        query = update.callback_query
+        await query.answer()
+        try:
+            await context.bot.send_message(chat_id=query.message.chat.id, text=prompt)
+        except Exception:
             try:
-                await query.edit_message_text(text=text)
+                await query.edit_message_text(text=prompt)
             except Exception:
                 pass
+    return SUGGEST_WAIT_TEXT
+
+async def suggest_receive_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    user = update.effective_user
+    if not text:
+        await update.message.reply_text("Пустое сообщение. Напишите текст предложения.")
+        return SUGGEST_WAIT_TEXT
+    admin_text = (
+        f"Предложение по улучшению:\n"
+        f"От: {user.first_name or ''} (@{user.username or '—'}, id={user.id})\n\n"
+        f"{text}"
+    )
+    if ADMIN_ID:
+        try:
+            await context.bot.send_message(chat_id=ADMIN_ID, text=admin_text)
+        except Exception:
+            pass
+    await update.message.reply_text("Спасибо! Ваше предложение отправлено администратору.")
+    return ConversationHandler.END
+
+async def suggest_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Отменено.")
+    return ConversationHandler.END
+
+async def suggest_start_inside_profit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["awaiting_suggestion"] = True
+    prompt = "Опишите ваше предложение по улучшению одним сообщением. После этого вернёмся к вводу суммы профита."
+    await update.message.reply_text(prompt)
+    return ASK_AMOUNT
+
+async def route_private_text_in_profit_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("awaiting_suggestion"):
+        text = (update.message.text or "").strip()
+        user = update.effective_user
+        context.user_data["awaiting_suggestion"] = False
+        if not text:
+            await update.message.reply_text("Пустое сообщение. Напишите текст предложения.")
+            context.user_data["awaiting_suggestion"] = True
+            return ASK_AMOUNT
+        admin_text = (
+            f"Предложение по улучшению:\n"
+            f"От: {user.first_name or ''} (@{user.username or '—'}, id={user.id})\n\n"
+            f"{text}"
+        )
+        if ADMIN_ID:
+            try:
+                await context.bot.send_message(chat_id=ADMIN_ID, text=admin_text)
+            except Exception:
+                pass
+        await update.message.reply_text("Спасибо! Ваше предложение отправлено администратору. Вернёмся к заявке на профит.")
+        return ASK_AMOUNT
+    return await profit_receive(update, context)
 
 
 async def stats_private_notice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -930,14 +1007,14 @@ def main() -> None:
                     MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Моя статистика$"), my_command),
                     MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Помощь$"), help_command),
                     MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Статистика$"), stats_private_notice),
+                    MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Предложения по улучшению$"), suggest_start_inside_profit),
                     MessageHandler(
                         filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
-                        profit_receive,
+                        route_private_text_in_profit_dialog,
                     ),
                     CallbackQueryHandler(profit_cancel_button, pattern="^profit_cancel$"),
                     CallbackQueryHandler(profit_set_time_button, pattern="^profit_set_time$"),
-                    # Позволяем работать кнопкам со стартового экрана и периодам статистики, даже во время диалога
-                    CallbackQueryHandler(handle_callback, pattern="^(start:(help|stats|my)|stats:(week|month|all)|my:(week|month|all))$")
+                    # Удалено: CallbackQueryHandler(handle_callback, pattern="^(start:(help|stats|my|suggest)|stats:(week|month|all)|my:(week|month|all))$")
                 ],
                 ConversationHandler.TIMEOUT: [TypeHandler(Update, profit_timeout)],
             },
@@ -948,8 +1025,28 @@ def main() -> None:
             conversation_timeout=600,
             name="profit",
             persistent=True,
-            # Отключаем per_message для совместимости с командой /profit и корректной работы cancel
             # per_message=True,
+        )
+
+        # Диалог предложений (persistent)
+        suggest_conv = ConversationHandler(
+            entry_points=[
+                CommandHandler("suggest", suggest_start_conv, filters=filters.ChatType.PRIVATE),
+                CallbackQueryHandler(suggest_start_conv, pattern="^start:suggest$"),
+                MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Предложения по улучшению$"), suggest_start_conv),
+            ],
+            states={
+                SUGGEST_WAIT_TEXT: [
+                    MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, suggest_receive_conv),
+                    CommandHandler("cancel", suggest_cancel_command),
+                ]
+            },
+            fallbacks=[
+                CommandHandler("cancel", suggest_cancel_command),
+            ],
+            conversation_timeout=600,
+            name="suggest",
+            persistent=True,
         )
 
         # Регистрируем обработчики команд и сообщений
@@ -960,6 +1057,7 @@ def main() -> None:
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("my", my_command, filters=filters.ChatType.PRIVATE))
         application.add_handler(profit_conv)
+        application.add_handler(suggest_conv)
         # Reply-кнопки в личке: Моя статистика, Помощь, Статистика
         application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Моя статистика$"), my_command))
         application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Помощь$"), help_command))
