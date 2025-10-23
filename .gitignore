@@ -1,0 +1,12 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+
+# Runtime and local artifacts
+bot.db
+bot.lock
+bot_state.pkl
+
+# Local storage of profit requests (sensitive)
+storage/
