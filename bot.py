@@ -1,6 +1,8 @@
 import os
 import re
 import warnings
+# Подавляем депрекейшн-предупреждение от pkg_resources как можно раньше
+warnings.filterwarnings("ignore", category=UserWarning, message=".*pkg_resources.*")
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -15,8 +17,7 @@ from telegram.ext import (
     PicklePersistence,
 )
 
-# Подавляем депрекейшн-предупреждение от pkg_resources
-warnings.filterwarnings("ignore", category=UserWarning, message=".*pkg_resources.*")
+# Удалено: позднее подавление предупреждений
 
 from db import init_db, create_profit_request, get_profit, update_final_amount, set_status, get_approved_profits_between, get_all_profits, reset_all_to_rejected, delete_all_profits, get_profits_by_user, reset_user_to_rejected, get_user_ids_by_username, ensure_user_seen, get_user_first_seen
 from datetime import datetime, timedelta, timezone
@@ -732,9 +733,12 @@ async def reset_profits_command(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     # Переводим все в rejected
-    reset_all_to_rejected()
+    changed = reset_all_to_rejected()
     purge_approved_and_pending()
-    await update.message.reply_text("Все заявки переведены в отклонённые.")
+    if changed == 0:
+        await update.message.reply_text("Не было заявок для изменения.")
+    else:
+        await update.message.reply_text(f"Переведено в отклонённые: {changed} заявок.")
 
 
 async def reset_user_profits_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -752,7 +756,7 @@ async def reset_user_profits_command(update: Update, context: ContextTypes.DEFAU
     target_user_id = None
     target_username = None
 
-    if arg.startswith("@"):
+    if arg.startswith("@"): 
         target_username = arg[1:]
         ids = get_user_ids_by_username(target_username)
         if not ids:
@@ -772,14 +776,14 @@ async def reset_user_profits_command(update: Update, context: ContextTypes.DEFAU
         return
 
     # Переводим всё в rejected в БД
-    reset_user_to_rejected(target_user_id)
+    changed = reset_user_to_rejected(target_user_id)
 
     # Чистим файловое хранилище
     for row in rows:
         profit_id = row[0]
         remove_files_for_profit_id(profit_id)
 
-    await update.message.reply_text("Профиты пользователя аннулированы.")
+    await update.message.reply_text(f"Профиты пользователя аннулированы. Изменено: {changed} записей.")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

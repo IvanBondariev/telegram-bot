@@ -150,13 +150,14 @@ def get_all_profits():
         conn.close()
 
 
-def reset_all_to_rejected():
+def reset_all_to_rejected() -> int:
     conn = _connect()
     try:
-        conn.execute(
-            "UPDATE profits SET status = 'rejected', approved_at = NULL, approver_id = NULL"
+        cur = conn.execute(
+            "UPDATE profits SET status = 'rejected', approved_at = NULL, approver_id = NULL WHERE status != 'rejected'"
         )
         conn.commit()
+        return cur.rowcount or 0
     finally:
         conn.close()
 
@@ -181,14 +182,15 @@ def get_profits_by_user(user_id: int):
         conn.close()
 
 
-def reset_user_to_rejected(user_id: int):
+def reset_user_to_rejected(user_id: int) -> int:
     conn = _connect()
     try:
-        conn.execute(
-            "UPDATE profits SET status = 'rejected', approved_at = NULL, approver_id = NULL WHERE user_id = ?",
+        cur = conn.execute(
+            "UPDATE profits SET status = 'rejected', approved_at = NULL, approver_id = NULL WHERE user_id = ? AND status != 'rejected'",
             (user_id,),
         )
         conn.commit()
+        return cur.rowcount or 0
     finally:
         conn.close()
 
