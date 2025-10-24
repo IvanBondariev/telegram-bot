@@ -1147,14 +1147,16 @@ def main() -> None:
         application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, echo))
         application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.Sticker.ALL, sticker_id_helper))
 
-        # Debug-хэндлер для логирования всех апдейтов
+                # Debug-хэндлер для логирования всех апдейтов
         async def debug_all(update: Update, context):
+            print(f"DEBUG: Получено обновление: {update}")
             logger.info(f"Получено обновление: {update}")
 
         application.add_handler(MessageHandler(filters.ALL, debug_all))
 
         print("Бот запущен. Нажмите Ctrl+C для остановки.")
         application.run_polling(drop_pending_updates=True)
+
 
 
 if __name__ == "__main__":
