@@ -1,5 +1,6 @@
 import os
 import re
+import warnings
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -13,6 +14,10 @@ from telegram.ext import (
     TypeHandler,
     PicklePersistence,
 )
+
+# Подавляем депрекейшн-предупреждение от pkg_resources
+warnings.filterwarnings("ignore", category=UserWarning, message=".*pkg_resources.*")
+
 from db import init_db, create_profit_request, get_profit, update_final_amount, set_status, get_approved_profits_between, get_all_profits, reset_all_to_rejected, delete_all_profits, get_profits_by_user, reset_user_to_rejected, get_user_ids_by_username, ensure_user_seen, get_user_first_seen
 from datetime import datetime, timedelta, timezone
 from fs_storage import save_pending_profit, save_approved_profit, save_rejected_profit, purge_storage, purge_approved_and_pending, remove_files_for_profit_id
@@ -47,11 +52,50 @@ def fmt_uah(value: float) -> str:
         s = f"{int_part},{frac}" if frac else int_part
     return f"{s} ₴"
 
+# Унифицированные клавиатуры
+def make_period_keyboard(prefix: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("За неделю", callback_data=f"{prefix}:week"),
+            InlineKeyboardButton("За месяц", callback_data=f"{prefix}:month"),
+            InlineKeyboardButton("За всё время", callback_data=f"{prefix}:all"),
+        ]
+    ])
+
+
+def make_start_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Отправить профит", callback_data="start_profit"),
+            InlineKeyboardButton("Моя статистика", callback_data="start:my"),
+        ],
+        [
+            InlineKeyboardButton("Статистика", callback_data="start:stats"),
+            InlineKeyboardButton("Помощь", callback_data="start:help"),
+        ],
+        [
+            InlineKeyboardButton("Предложения по улучшению", callback_data="start:suggest"),
+        ],
+    ])
+
+
+def make_admin_moderation_keyboard(req_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Подтвердить", callback_data=f"approve:{req_id}"),
+            InlineKeyboardButton("Отклонить", callback_data=f"reject:{req_id}"),
+        ],
+        [
+            InlineKeyboardButton("Изменить сумму", callback_data=f"edit:{req_id}"),
+        ],
+    ])
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Фиксируем пользователя в БД (дата присоединения)
     user = update.effective_user
     ensure_user_seen(user.id, user.username, user.first_name)
+
     is_admin = update.effective_user.id == ADMIN_ID
     intro = (
         "Привет! Добро пожаловать в команду.\n"
@@ -81,7 +125,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_kb = ReplyKeyboardMarkup(
             [
                 [KeyboardButton("Добавить профит"), KeyboardButton("Моя статистика")],
-                [KeyboardButton("Статистика"), KeyboardButton("Помощь")],
+                [KeyboardButton("Помощь")],
                 [KeyboardButton("Предложения по улучшению")],
             ],
             resize_keyboard=True,
@@ -90,12 +134,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Быстрые кнопки доступны всегда:", reply_markup=reply_kb)
         except Exception:
             pass
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Отправить профит", callback_data="start_profit")],
-        [InlineKeyboardButton("Моя статистика", callback_data="start:my")],
-        [InlineKeyboardButton("Статистика", callback_data="start:stats"), InlineKeyboardButton("Помощь", callback_data="start:help")],
-        [InlineKeyboardButton("Предложения по улучшению", callback_data="start:suggest")],
-    ])
+    keyboard = make_start_keyboard()
     await update.message.reply_text(text, reply_markup=keyboard)
 
 
@@ -107,16 +146,10 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.chat_data["stats_cooldown"] = now
 
-    # Определяем период по умолчанию — неделя
+    # Определяем период по умолчанию — неделю
     period = "week"
     text = build_stats_text(period)
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("За неделю", callback_data="stats:week"),
-            InlineKeyboardButton("За месяц", callback_data="stats:month"),
-            InlineKeyboardButton("За всё время", callback_data="stats:all"),
-        ]
-    ])
+    keyboard = make_period_keyboard("stats")
     if update.message:
         await update.message.reply_text(text, reply_markup=keyboard)
     else:
@@ -192,15 +225,26 @@ async def profit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Фиксируем пользователя в БД (дата присоединения)
     user = update.effective_user
     ensure_user_seen(user.id, user.username, user.first_name)
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Поставить текущее время", callback_data="profit_set_time"), InlineKeyboardButton("Отменить", callback_data="profit_cancel")]])
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏰ Поставить текущее время", callback_data="profit_set_time")],
+        [InlineKeyboardButton("❌ Отменить", callback_data="profit_cancel")]
+    ])
     prompt_text = (
-        "Укажите сумму профита в грн. Только число.\n"
-        "Примеры: 1000, 1500.50, 1 500"
+        "💰 <b>Добавление профита</b>\n\n"
+        "📝 Укажите сумму профита в гривнах:\n"
+        "• Только числовое значение\n"
+        "• Можно использовать десятичные дроби\n\n"
+        "📋 <b>Примеры:</b>\n"
+        "• <code>1000</code>\n"
+        "• <code>1500.50</code>\n"
+        "• <code>1 500</code>\n\n"
+        "⚡️ Для быстрого ввода можете отметить текущее время"
     )
     # Поддержка входа как по команде, так и по callback
     if update.message:
         msg = await update.message.reply_text(
             prompt_text,
+            parse_mode='HTML',
             disable_notification=True,
             reply_markup=keyboard,
         )
@@ -211,6 +255,7 @@ async def profit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await context.bot.send_message(
             chat_id=query.message.chat.id,
             text=prompt_text,
+            parse_mode='HTML',
             disable_notification=True,
             reply_markup=keyboard,
         )
@@ -246,16 +291,27 @@ async def profit_set_time_button(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     # Сохраняем отметку времени в UTC
     context.user_data["profit_time_label"] = datetime.utcnow().isoformat()
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Поставить текущее время", callback_data="profit_set_time"), InlineKeyboardButton("Отменить", callback_data="profit_cancel")]])
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏰ Поставить текущее время", callback_data="profit_set_time")],
+        [InlineKeyboardButton("❌ Отменить", callback_data="profit_cancel")]
+    ])
     prompt_text = (
-        "Время отмечено. Укажите сумму профита в грн. Только число.\n"
-        "Примеры: 1000, 1500.50, 1 500"
+        "💰 <b>Добавление профита</b>\n\n"
+        "✅ <b>Время отмечено!</b>\n\n"
+        "📝 Укажите сумму профита в гривнах:\n"
+        "• Только числовое значение\n"
+        "• Можно использовать десятичные дроби\n\n"
+        "📋 <b>Примеры:</b>\n"
+        "• <code>1000</code>\n"
+        "• <code>1500.50</code>\n"
+        "• <code>1 500</code>\n\n"
+        "⚡️ Для быстрого ввода можете отметить текущее время"
     )
     try:
-        await query.edit_message_text(text=prompt_text, reply_markup=keyboard)
+        await query.edit_message_text(text=prompt_text, parse_mode='HTML', reply_markup=keyboard)
     except Exception:
         try:
-            await context.bot.send_message(chat_id=query.message.chat.id, text=prompt_text, reply_markup=keyboard)
+            await context.bot.send_message(chat_id=query.message.chat.id, text=prompt_text, parse_mode='HTML', reply_markup=keyboard)
         except Exception:
             pass
     return ASK_AMOUNT
@@ -309,20 +365,33 @@ async def profit_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def profit_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     session_msg_id = context.user_data.get("profit_session_message_id")
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Отменить", callback_data="profit_cancel")]])
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Отменить", callback_data="profit_cancel")]
+    ])
     # Ищем первое число (целое или десятичное), допускаем пробелы как разделители тысяч
     match = re.search(r"(\d[\d\s]*([\.,]\d{1,2})?)", text)
     if not match:
+        error_text = (
+            "❌ <b>Ошибка ввода</b>\n\n"
+            "🔍 Не удалось распознать сумму в вашем сообщении.\n\n"
+            "📋 <b>Правильные примеры:</b>\n"
+            "• <code>1500</code>\n"
+            "• <code>2000.50</code>\n"
+            "• <code>1 500</code>\n\n"
+            "💡 Попробуйте ещё раз или отмените операцию"
+        )
         if session_msg_id:
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=session_msg_id,
-                text="Не удалось распознать сумму. Введите число, например: 1500.",
+                text=error_text,
+                parse_mode='HTML',
                 reply_markup=keyboard,
             )
         else:
             await update.message.reply_text(
-                "Не удалось распознать сумму. Введите число, например: 1500.",
+                error_text,
+                parse_mode='HTML',
                 reply_markup=keyboard,
             )
         # Пытаемся удалить пользовательское сообщение, чтобы не засорять чат
@@ -336,16 +405,27 @@ async def profit_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amount = float(amount_str)
     except ValueError:
+        error_text = (
+            "❌ <b>Ошибка формата</b>\n\n"
+            "🔢 Некорректное числовое значение.\n\n"
+            "📋 <b>Правильные примеры:</b>\n"
+            "• <code>1500</code>\n"
+            "• <code>2000.50</code>\n"
+            "• <code>1 500</code>\n\n"
+            "💡 Попробуйте ещё раз или отмените операцию"
+        )
         if session_msg_id:
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=session_msg_id,
-                text="Некорректное число. Попробуйте ещё раз, например: 1500.",
+                text=error_text,
+                parse_mode='HTML',
                 reply_markup=keyboard,
             )
         else:
             await update.message.reply_text(
-                "Некорректное число. Попробуйте ещё раз, например: 1500.",
+                error_text,
+                parse_mode='HTML',
                 reply_markup=keyboard,
             )
         try:
@@ -355,16 +435,25 @@ async def profit_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ASK_AMOUNT
 
     if amount <= 0:
-        msg_text = "Сумма должна быть больше нуля. Попробуйте снова: например, 1500."
+        error_text = (
+            "❌ <b>Некорректная сумма</b>\n\n"
+            "⚠️ Сумма профита должна быть больше нуля.\n\n"
+            "📋 <b>Правильные примеры:</b>\n"
+            "• <code>1500</code>\n"
+            "• <code>2000.50</code>\n"
+            "• <code>1 500</code>\n\n"
+            "💡 Попробуйте ещё раз или отмените операцию"
+        )
         if session_msg_id:
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=session_msg_id,
-                text=msg_text,
+                text=error_text,
+                parse_mode='HTML',
                 reply_markup=keyboard,
             )
         else:
-            await update.message.reply_text(msg_text, reply_markup=keyboard)
+            await update.message.reply_text(error_text, parse_mode='HTML', reply_markup=keyboard)
         try:
             await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=update.message.message_id)
         except Exception:
@@ -391,13 +480,7 @@ async def profit_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_pending_profit(row)
 
     # Отправляем админу/в группу заявку с кнопками
-    admin_keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Подтвердить", callback_data=f"approve:{profit_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{profit_id}"),
-            InlineKeyboardButton("✏️ Изменить сумму", callback_data=f"edit:{profit_id}"),
-        ],
-    ])
+    admin_keyboard = make_admin_moderation_keyboard(profit_id)
     name = f"@{user.username}" if user.username else (user.first_name or str(user.id))
     time_iso = context.user_data.get("profit_time_label") or (row[8] if row else None)
     time_str = f" • время: {format_time_local(time_iso)}" if time_iso else ""
@@ -475,13 +558,7 @@ async def admin_edit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.pop("editing_request_id", None)
 
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Подтвердить", callback_data=f"approve:{editing_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{editing_id}"),
-            InlineKeyboardButton("✏️ Изменить сумму", callback_data=f"edit:{editing_id}"),
-        ],
-    ])
+    keyboard = make_admin_moderation_keyboard(editing_id)
     await update.message.reply_text(
         f"Заявка #{editing_id} обновлена. Итоговая сумма: {fmt_uah(amount)}",
         reply_markup=keyboard,
@@ -516,13 +593,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("stats:"):
         period = data.split(":", 1)[1]
         text = build_stats_text(period)
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("За неделю", callback_data="stats:week"),
-                InlineKeyboardButton("За месяц", callback_data="stats:month"),
-                InlineKeyboardButton("За всё время", callback_data="stats:all"),
-            ]
-        ])
+        keyboard = make_period_keyboard("stats")
         try:
             await query.edit_message_text(text=text, reply_markup=keyboard)
         except Exception:
@@ -535,13 +606,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         period = data.split(":", 1)[1]
         user_id = update.effective_user.id
         text = build_my_text(user_id, period)
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("За неделю", callback_data="my:week"),
-                InlineKeyboardButton("За месяц", callback_data="my:month"),
-                InlineKeyboardButton("За всё время", callback_data="my:all"),
-            ]
-        ])
+        keyboard = make_period_keyboard("my")
         try:
             await query.edit_message_text(text=text, reply_markup=keyboard)
         except Exception:
@@ -603,6 +668,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         pass
             except Exception:
                 pass
+
 
             # Обновляем сообщение для админа/группы
             name = f"@{row[2]}" if row[2] else (row[3] or str(user_id))
@@ -941,13 +1007,7 @@ async def my_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     # По умолчанию показываем за всё время и даём кнопки переключения периода
     text = build_my_text(user_id, period="all")
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("За неделю", callback_data="my:week"),
-            InlineKeyboardButton("За месяц", callback_data="my:month"),
-            InlineKeyboardButton("За всё время", callback_data="my:all"),
-        ]
-    ])
+    keyboard = make_period_keyboard("my")
     if update.message:
         await update.message.reply_text(text, reply_markup=keyboard)
     else:
@@ -1003,7 +1063,7 @@ def main() -> None:
             ],
             states={
                 ASK_AMOUNT: [
-                    # Точные кнопки из reply-клавиатуры во время диалога
+                    MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Добавить профит$"), profit_command),
                     MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Моя статистика$"), my_command),
                     MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Помощь$"), help_command),
                     MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Статистика$"), stats_private_notice),
@@ -1025,7 +1085,7 @@ def main() -> None:
             conversation_timeout=600,
             name="profit",
             persistent=True,
-            # per_message=True,
+            per_message=True,
         )
 
         # Диалог предложений (persistent)
@@ -1047,6 +1107,7 @@ def main() -> None:
             conversation_timeout=600,
             name="suggest",
             persistent=True,
+            per_message=True,
         )
 
         # Регистрируем обработчики команд и сообщений

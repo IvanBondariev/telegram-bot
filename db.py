@@ -41,6 +41,31 @@ def init_db():
             )
             """
         )
+        # Индексы для ускорения запросов
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_profits_status_approved_at
+            ON profits(status, approved_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_profits_user_id
+            ON profits(user_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_profits_username
+            ON profits(username)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_users_last_seen
+            ON users(last_seen)
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -200,8 +225,11 @@ def ensure_user_seen(user_id: int, username: str | None, first_name: str | None)
 def get_user_first_seen(user_id: int) -> str | None:
     conn = _connect()
     try:
-        cur = conn.execute("SELECT first_seen FROM users WHERE user_id = ?", (user_id,))
+        cur = conn.execute(
+            "SELECT first_seen FROM users WHERE user_id = ?",
+            (user_id,),
+        )
         row = cur.fetchone()
-        return row[0] if row else None
+        return row[0] if row and row[0] else None
     finally:
         conn.close()
