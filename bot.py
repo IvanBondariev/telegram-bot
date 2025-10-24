@@ -24,6 +24,11 @@ from datetime import datetime, timedelta, timezone
 from fs_storage import save_pending_profit, save_approved_profit, save_rejected_profit, purge_storage, purge_approved_and_pending, remove_files_for_profit_id
 from filelock import FileLock
 from zoneinfo import ZoneInfo
+import logging
+
+# Настройка логов — чтобы видеть все апдейты в журнале
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 # Загружаем переменные окружения из .env
 load_dotenv()
@@ -1029,6 +1034,15 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Простой echo-ответ на любые текстовые сообщения
     await update.message.reply_text(update.message.text)
 
+async def sticker_id_helper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sticker = update.message.sticker if update.message else None
+    if not sticker:
+        return
+    try:
+        await update.message.reply_text(f"Sticker file_id: {sticker.file_id}")
+    except Exception:
+        pass
+
 
 def format_time_local(iso_str: str) -> str:
     # Преобразуем ISO-дату (UTC) в локальное время и форматируем
@@ -1078,7 +1092,6 @@ def main() -> None:
                     ),
                     CallbackQueryHandler(profit_cancel_button, pattern="^profit_cancel$"),
                     CallbackQueryHandler(profit_set_time_button, pattern="^profit_set_time$"),
-                    # Удалено: CallbackQueryHandler(handle_callback, pattern="^(start:(help|stats|my|suggest)|stats:(week|month|all)|my:(week|month|all))$")
                 ],
                 ConversationHandler.TIMEOUT: [TypeHandler(Update, profit_timeout)],
             },
@@ -1089,7 +1102,9 @@ def main() -> None:
             conversation_timeout=600,
             name="profit",
             persistent=True,
-            per_message=True,
+            per_chat=True,
+            per_user=True,
+            per_message=False,
         )
 
         # Диалог предложений (persistent)
@@ -1130,6 +1145,13 @@ def main() -> None:
         application.add_handler(CallbackQueryHandler(handle_callback))
         application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, admin_edit_amount))
         application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, echo))
+        application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.Sticker.ALL, sticker_id_helper))
+
+        # Debug-хэндлер для логирования всех апдейтов
+        async def debug_all(update: Update, context):
+            logger.info(f"Получено обновление: {update}")
+
+        application.add_handler(MessageHandler(filters.ALL, debug_all))
 
         print("Бот запущен. Нажмите Ctrl+C для остановки.")
         application.run_polling(drop_pending_updates=True)
