@@ -593,8 +593,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "start:my":
         await my_command(update, context)
         return
-    # Удалено: if data == "start:suggest": await suggest_start_conv(update, context); return
-
+    if data == "start:suggest":
+        await suggest_start_conv(update, context)
+        return
+    
     # Статистика: периоды
     if data.startswith("stats:"):
         period = data.split(":", 1)[1]
