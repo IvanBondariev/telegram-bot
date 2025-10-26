@@ -1128,7 +1128,9 @@ def main() -> None:
             conversation_timeout=600,
             name="suggest",
             persistent=True,
-            per_message=True,
+            per_chat=True,
+            per_user=True,
+            per_message=False,
         )
 
         # Регистрируем обработчики команд и сообщений
