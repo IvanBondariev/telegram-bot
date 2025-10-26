@@ -1081,58 +1081,6 @@ async def track_group_activity(update: Update, context: ContextTypes.DEFAULT_TYP
         set_member_status(chat.id, user.id, user.username, user.first_name, status)
     except Exception as e:
         logger.warning(f"Не удалось сохранить статус участника: {e}")
-
-
-def _format_mention(user_id: int, username: str | None, first_name: str | None) -> str:
-    if username:
-        return f"@{username}"
-    name = (first_name or "друг").replace('<', '').replace('>', '')
-    return f"<a href=\"tg://user?id={user_id}\">{name}</a>"
-
-
-async def all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отметить (упомянуть) всех известных активных участников группы."""
-    if update.effective_chat.type not in ("group", "supergroup"):
-        if update.message:
-            await update.message.reply_text("Эта команда доступна только в группе.")
-        return
-    chat_id = update.effective_chat.id
-
-    members = get_active_members(chat_id) or []
-
-    # Фоллбек: если база пустая, попробуем упомянуть админов
-    if not members:
-        try:
-            admins = await context.bot.get_chat_administrators(chat_id)
-            for a in admins:
-                u = a.user
-                members.append((u.id, u.username, u.first_name, 'administrator'))
-        except Exception:
-            pass
-
-    if not members:
-        await update.message.reply_text("Не удалось получить список участников. Попробуйте позже.")
-        return
-
-    unique = {}
-    for uid, uname, fname, _ in members:
-        unique[uid] = (uname, fname)
-
-    mentions = [_format_mention(uid, uname, fname) for uid, (uname, fname) in unique.items()]
-
-    # Ограничим длину: отправляем батчами по ~25 упоминаний
-    batch_size = 25
-    chunks = [mentions[i:i+batch_size] for i in range(0, len(mentions), batch_size)]
-
-    for idx, chunk in enumerate(chunks):
-        prefix = "Призываю всех:" if idx == 0 else "Продолжаю отмечать:"
-        text = prefix + "\n" + " ".join(chunk)
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        except Exception as e:
-            logger.warning(f"Не удалось отправить упоминания: {e}")
-
-
 def main() -> None:
     # Гарантируем один экземпляр через lock-файл
     lock_path = os.path.join(os.path.dirname(__file__), "bot.lock")
@@ -1223,6 +1171,8 @@ def main() -> None:
         application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.Sticker.ALL, sticker_id_helper))
         application.add_handler(ChatMemberHandler(track_group_activity, ChatMemberHandler.CHAT_MEMBER))
         application.add_handler(ChatMemberHandler(track_group_activity, ChatMemberHandler.MY_CHAT_MEMBER))
+        # Фиксировать участников по групповым сообщениям для расширения охвата /all
+        application.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, track_message_member_status))
 
                 # Debug-хэндлер для логирования всех апдейтов
         async def debug_all(update: Update, context):
@@ -1234,6 +1184,72 @@ def main() -> None:
         print("Бот запущен. Нажмите Ctrl+C для остановки.")
         application.run_polling(drop_pending_updates=True)
 
+
+
+async def track_message_member_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Фиксируем участника по любому сообщению в группе, чтобы расширять охват /all."""
+    if not update.effective_chat or update.effective_chat.type not in ("group", "supergroup"):
+        return
+    user = update.effective_user
+    if not user:
+        return
+    chat_id = update.effective_chat.id
+    try:
+        cm = await context.bot.get_chat_member(chat_id, user.id)
+        status = cm.status
+        set_member_status(chat_id, user.id, user.username, user.first_name, status)
+    except Exception as e:
+        logger.debug(f"track_message_member_status: skip ({e})")
+
+
+def _format_mention(user_id: int, username: str | None, first_name: str | None) -> str:
+    if username:
+        return f"@{username}"
+    name = (first_name or "друг").replace('<', '').replace('>', '')
+    return f"<a href=\"tg://user?id={user_id}\">{name}</a>"
+
+
+async def all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отметить (упомянуть) всех известных активных участников группы."""
+    if update.effective_chat.type not in ("group", "supergroup"):
+        if update.message:
+            await update.message.reply_text("Эта команда доступна только в группе.")
+        return
+    chat_id = update.effective_chat.id
+
+    members = get_active_members(chat_id) or []
+
+    # Фоллбек: если база пустая, попробуем упомянуть админов
+    if not members:
+        try:
+            admins = await context.bot.get_chat_administrators(chat_id)
+            for a in admins:
+                u = a.user
+                members.append((u.id, u.username, u.first_name, 'administrator'))
+        except Exception:
+            pass
+
+    if not members:
+        await update.message.reply_text("Не удалось получить список участников. Попробуйте позже.")
+        return
+
+    unique = {}
+    for uid, uname, fname, _ in members:
+        unique[uid] = (uname, fname)
+
+    mentions = [_format_mention(uid, uname, fname) for uid, (uname, fname) in unique.items()]
+
+    # Ограничим длину: отправляем батчами по ~25 упоминаний
+    batch_size = 25
+    chunks = [mentions[i:i+batch_size] for i in range(0, len(mentions), batch_size)]
+
+    for idx, chunk in enumerate(chunks):
+        prefix = "Призываю всех:" if idx == 0 else "Продолжаю отмечать:"
+        text = prefix + "\n" + " ".join(chunk)
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        except Exception as e:
+            logger.warning(f"Не удалось отправить упоминания: {e}")
 
 
 if __name__ == "__main__":
