@@ -15,15 +15,17 @@ from telegram.ext import (
     filters,
     TypeHandler,
     PicklePersistence,
+    ChatMemberHandler,
 )
 
 # Удалено: позднее подавление предупреждений
 
-from db import init_db, create_profit_request, get_profit, update_final_amount, set_status, get_approved_profits_between, get_all_profits, reset_all_to_rejected, delete_all_profits, get_profits_by_user, reset_user_to_rejected, get_user_ids_by_username, ensure_user_seen, get_user_first_seen
+from db import init_db, create_profit_request, get_profit, update_final_amount, set_status, get_approved_profits_between, get_all_profits, reset_all_to_rejected, delete_all_profits, get_profits_by_user, reset_user_to_rejected, get_user_ids_by_username, ensure_user_seen, get_user_first_seen, set_member_status, get_active_members
 from datetime import datetime, timedelta, timezone
 from fs_storage import save_pending_profit, save_approved_profit, save_rejected_profit, purge_storage, purge_approved_and_pending, remove_files_for_profit_id
 from filelock import FileLock
 from zoneinfo import ZoneInfo
+from telegram.constants import ParseMode
 import logging
 
 # Настройка логов — чтобы видеть все апдейты в журнале
@@ -823,6 +825,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "",
             "Группа:",
             "• /stats — показать сводную статистику; используйте кнопки ‘За неделю’, ‘За месяц’, ‘За всё время’",
+            "• /all — отметить всех участников (упоминания); использовать осторожно",
         ]
     text = "\n".join(lines)
     if update.message:
@@ -1063,6 +1066,73 @@ def format_time_local(iso_str: str) -> str:
             return datetime.utcnow().strftime("%d.%m %H:%M") + " UTC"
 
 
+async def track_group_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сохраняем статусы участников групп по апдейтам chat_member/my_chat_member."""
+    cm = update.chat_member or update.my_chat_member
+    if not cm:
+        return
+    chat = cm.chat
+    member = cm.new_chat_member
+    if not member:
+        return
+    user = member.user
+    status = member.status
+    try:
+        set_member_status(chat.id, user.id, user.username, user.first_name, status)
+    except Exception as e:
+        logger.warning(f"Не удалось сохранить статус участника: {e}")
+
+
+def _format_mention(user_id: int, username: str | None, first_name: str | None) -> str:
+    if username:
+        return f"@{username}"
+    name = (first_name or "друг").replace('<', '').replace('>', '')
+    return f"<a href=\"tg://user?id={user_id}\">{name}</a>"
+
+
+async def all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отметить (упомянуть) всех известных активных участников группы."""
+    if update.effective_chat.type not in ("group", "supergroup"):
+        if update.message:
+            await update.message.reply_text("Эта команда доступна только в группе.")
+        return
+    chat_id = update.effective_chat.id
+
+    members = get_active_members(chat_id) or []
+
+    # Фоллбек: если база пустая, попробуем упомянуть админов
+    if not members:
+        try:
+            admins = await context.bot.get_chat_administrators(chat_id)
+            for a in admins:
+                u = a.user
+                members.append((u.id, u.username, u.first_name, 'administrator'))
+        except Exception:
+            pass
+
+    if not members:
+        await update.message.reply_text("Не удалось получить список участников. Попробуйте позже.")
+        return
+
+    unique = {}
+    for uid, uname, fname, _ in members:
+        unique[uid] = (uname, fname)
+
+    mentions = [_format_mention(uid, uname, fname) for uid, (uname, fname) in unique.items()]
+
+    # Ограничим длину: отправляем батчами по ~25 упоминаний
+    batch_size = 25
+    chunks = [mentions[i:i+batch_size] for i in range(0, len(mentions), batch_size)]
+
+    for idx, chunk in enumerate(chunks):
+        prefix = "Призываю всех:" if idx == 0 else "Продолжаю отмечать:"
+        text = prefix + "\n" + " ".join(chunk)
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        except Exception as e:
+            logger.warning(f"Не удалось отправить упоминания: {e}")
+
+
 def main() -> None:
     # Гарантируем один экземпляр через lock-файл
     lock_path = os.path.join(os.path.dirname(__file__), "bot.lock")
@@ -1136,6 +1206,7 @@ def main() -> None:
         # Регистрируем обработчики команд и сообщений
         application.add_handler(CommandHandler("start", start, filters=filters.ChatType.PRIVATE))
         application.add_handler(CommandHandler("stats", stats, filters=filters.ChatType.GROUPS))
+        application.add_handler(CommandHandler("all", all_command, filters=filters.ChatType.GROUPS))
         application.add_handler(CommandHandler("reset_profits", reset_profits_command, filters=filters.ChatType.PRIVATE))
         application.add_handler(CommandHandler("reset_user_profits", reset_user_profits_command, filters=filters.ChatType.PRIVATE))
         application.add_handler(CommandHandler("help", help_command))
@@ -1150,6 +1221,8 @@ def main() -> None:
         application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, admin_edit_amount))
         application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, echo))
         application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.Sticker.ALL, sticker_id_helper))
+        application.add_handler(ChatMemberHandler(track_group_activity, ChatMemberHandler.CHAT_MEMBER))
+        application.add_handler(ChatMemberHandler(track_group_activity, ChatMemberHandler.MY_CHAT_MEMBER))
 
                 # Debug-хэндлер для логирования всех апдейтов
         async def debug_all(update: Update, context):

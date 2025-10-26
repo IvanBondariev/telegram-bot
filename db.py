@@ -41,6 +41,20 @@ def init_db():
             )
             """
         )
+        # Новая таблица: участники чатов (для команды /all)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_members (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                status TEXT NOT NULL, -- member/administrator/creator/left/kicked/restricted
+                last_changed TEXT NOT NULL,
+                PRIMARY KEY (chat_id, user_id)
+            )
+            """
+        )
         # Индексы для ускорения запросов
         conn.execute(
             """
@@ -220,6 +234,48 @@ def ensure_user_seen(user_id: int, username: str | None, first_name: str | None)
                 (user_id, username, first_name, now, now),
             )
         conn.commit()
+    finally:
+        conn.close()
+
+
+# --- Учёт участников чата для команды /all ---
+
+def set_member_status(chat_id: int, user_id: int, username: str | None, first_name: str | None, status: str) -> None:
+    """Создать/обновить запись участника чата с актуальным статусом."""
+    conn = _connect()
+    try:
+        now = datetime.utcnow().isoformat()
+        conn.execute(
+            """
+            INSERT INTO chat_members (chat_id, user_id, username, first_name, status, last_changed)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                username = excluded.username,
+                first_name = excluded.first_name,
+                status = excluded.status,
+                last_changed = excluded.last_changed
+            """,
+            (chat_id, user_id, username, first_name, status, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_active_members(chat_id: int):
+    """Вернуть список активных участников (member/administrator/creator) для чата."""
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            """
+            SELECT user_id, username, first_name, status
+            FROM chat_members
+            WHERE chat_id = ? AND status IN ('member','administrator','creator')
+            ORDER BY last_changed DESC
+            """,
+            (chat_id,),
+        )
+        return cur.fetchall()
     finally:
         conn.close()
 
